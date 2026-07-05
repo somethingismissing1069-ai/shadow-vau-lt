@@ -1,0 +1,29 @@
+{
+  "name": "shadowvault",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ShadowVault – Secure One-Time & Time-Limited Encrypted File Sharing Platform",
+  "workspaces": [
+    "backend",
+    "frontend",
+    "shared"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=shared && npm run build --workspace=backend && npm run build --workspace=frontend",
+    "build:backend": "npm run build --workspace=backend",
+    "build:frontend": "npm run build --workspace=frontend",
+    "start:backend": "npm run start --workspace=backend",
+    "start:frontend": "npm run start --workspace=frontend"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "concurrently": "^8.2.2",
+    "fast-check": "^4.8.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
+    "typescript": "^5.4.0"
+  }
+}

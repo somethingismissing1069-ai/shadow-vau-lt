@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    depends_on:
+      - web
+      - api
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/ssl/certs:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    expose:
+      - "3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api:3001
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    expose:
+      - "3001"
+    depends_on:
+      - db
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://sv:${DB_PASSWORD}@db:5432/shadowvault
+      - JWT_SECRET=${JWT_SECRET}
+      - RSA_PRIVATE_KEY_PATH=/run/secrets/rsa_private_key
+      - UPLOAD_DIR=/data/encrypted
+      - MAX_UPLOAD_BYTES=104857600
+      - CORS_ORIGINS=https://${DOMAIN}
+      - BASE_URL=https://${DOMAIN}
+      - PORT=3001
+      - JWT_ACCESS_EXPIRES_IN=900
+      - JWT_REFRESH_EXPIRES_IN=604800
+      - RATE_LIMIT_WINDOW_MS=60000
+      - RATE_LIMIT_MAX_REQUESTS=100
+      - EXPIRY_CRON_SCHEDULE=*/5 * * * *
+    volumes:
+      - encrypted_files:/data/encrypted
+    secrets:
+      - rsa_private_key
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=shadowvault
+      - POSTGRES_USER=sv
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    expose:
+      - "5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sv -d shadowvault"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  expiry-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/workers/expiry.js"]
+    depends_on:
+      - db
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://sv:${DB_PASSWORD}@db:5432/shadowvault
+      - UPLOAD_DIR=/data/encrypted
+      - EXPIRY_CRON_SCHEDULE=*/5 * * * *
+    volumes:
+      - encrypted_files:/data/encrypted
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  encrypted_files:
+
+secrets:
+  rsa_private_key:
+    file: ./secrets/rsa_private_key.pem

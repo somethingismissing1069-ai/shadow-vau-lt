@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-bg-primary text-text-primary;
+    font-family: 'Inter', sans-serif;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-bg-glass backdrop-blur-glass border border-border-glass rounded-glass;
+  }
+
+  .glass-card-hover {
+    @apply glass-card transition-all duration-200 hover:border-border-focus hover:shadow-lg hover:shadow-text-accent/5;
+  }
+
+  .glass-input {
+    @apply w-full px-4 py-3 bg-bg-glass border border-border-glass rounded-xl text-text-primary placeholder-text-secondary/50 backdrop-blur-glass focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-border-focus transition-colors;
+  }
+
+  .glass-navbar {
+    @apply bg-bg-glass/80 backdrop-blur-glass border-b border-border-glass;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-gradient-to-r from-text-accent to-status-info bg-clip-text text-transparent;
+  }
+}

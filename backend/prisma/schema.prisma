@@ -1,0 +1,129 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                     String    @id @default(uuid())
+  email                  String    @unique
+  username               String    @unique
+  passwordHash           String    @map("password_hash")
+  rsaPublicKey           String    @map("rsa_public_key")
+  encryptedRsaPrivateKey String    @map("encrypted_rsa_private_key")
+  emailVerified          Boolean   @default(false) @map("email_verified")
+  isAdmin                Boolean   @default(false) @map("is_admin")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+  lastLoginAt            DateTime? @map("last_login_at")
+
+  files         File[]
+  encryptedKeys EncryptedKey[]
+  shareLinks    ShareLink[]
+  auditLogs     AuditLog[]
+  sessions      Session[]
+
+  @@map("users")
+}
+
+model File {
+  id                String    @id @default(uuid())
+  ownerId           String    @map("owner_id")
+  encryptedFilePath String    @map("encrypted_file_path")
+  originalFilename  String    @map("original_filename")
+  mimeType          String    @map("mime_type")
+  sizeBytes         BigInt    @map("size_bytes")
+  iv                Bytes
+  authTag           Bytes     @map("auth_tag")
+  downloadOnce      Boolean   @default(false) @map("download_once")
+  burnAfterReading  Boolean   @default(false) @map("burn_after_reading")
+  isDeleted         Boolean   @default(false) @map("is_deleted")
+  expiresAt         DateTime  @map("expires_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  deletedAt         DateTime? @map("deleted_at")
+
+  owner         User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  encryptedKeys EncryptedKey[]
+  shareLinks    ShareLink[]
+  auditLogs     AuditLog[]
+
+  @@index([ownerId])
+  @@index([expiresAt])
+  @@map("files")
+}
+
+model EncryptedKey {
+  id                   String    @id @default(uuid())
+  fileId               String    @map("file_id")
+  recipientId          String    @map("recipient_id")
+  wrappedAesKey        String    @map("wrapped_aes_key")
+  publicKeyFingerprint String    @map("public_key_fingerprint")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  destroyedAt          DateTime? @map("destroyed_at")
+
+  file      File @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  recipient User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([fileId])
+  @@map("encrypted_keys")
+}
+
+model ShareLink {
+  id              String    @id @default(uuid())
+  fileId          String    @map("file_id")
+  createdByUserId String    @map("created_by_user_id")
+  token           String    @unique
+  passwordHash    String?   @map("password_hash")
+  maxDownloads    Int       @default(1) @map("max_downloads")
+  downloadCount   Int       @default(0) @map("download_count")
+  expiresAt       DateTime  @map("expires_at")
+  lastAccessedAt  DateTime? @map("last_accessed_at")
+  revokedAt       DateTime? @map("revoked_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  file      File @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  createdBy User @relation(fields: [createdByUserId], references: [id])
+
+  @@index([token])
+  @@index([expiresAt])
+  @@map("share_links")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  fileId    String?  @map("file_id")
+  userId    String?  @map("user_id")
+  eventType String   @map("event_type")
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  file File? @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([fileId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  jwtJti    String   @unique @map("jwt_jti")
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  isRevoked Boolean  @default(false) @map("is_revoked")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([jwtJti])
+  @@map("sessions")
+}
