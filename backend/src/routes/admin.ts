@@ -10,9 +10,10 @@ import { IFileService } from '../services/interfaces/IFileService';
  * Routes:
  *   GET  /api/admin/users          – List all users with pagination
  *   GET  /api/admin/audit          – All audit logs with filtering/pagination
+ *   GET  /api/admin/files          – List all files with pagination
  *   DELETE /api/admin/files/:fileId – Admin force delete
  *
- * Requirements: 8.5, 10.1, 10.2, 10.3
+ * Requirements: 8.5, 10.1, 10.2, 10.3, 12.1
  */
 export function createAdminRouter(
   prisma: PrismaClient,
@@ -117,6 +118,88 @@ export function createAdminRouter(
       const result = await auditService.getAdminAuditLogs(filters, page, limit);
 
       res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * GET /api/admin/files
+   * List all files in the system with pagination.
+   * Query params: page (default 1), limit (default 50, max 200)
+   *
+   * Requirement: 12.1
+   */
+  router.get('/files', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+      const limit = Math.max(1, Math.min(200, parseInt(req.query.limit as string, 10) || 50));
+      const skip = (page - 1) * limit;
+
+      const [files, total] = await Promise.all([
+        prisma.file.findMany({
+          select: {
+            id: true,
+            originalFilename: true,
+            mimeType: true,
+            sizeBytes: true,
+            expiresAt: true,
+            createdAt: true,
+            isDeleted: true,
+            owner: {
+              select: {
+                username: true,
+              },
+            },
+            shareLinks: {
+              select: {
+                downloadCount: true,
+                maxDownloads: true,
+                revokedAt: true,
+              },
+              take: 1,
+              orderBy: { createdAt: 'desc' },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+        }),
+        prisma.file.count(),
+      ]);
+
+      const formattedFiles = files.map((file) => {
+        const shareLink = file.shareLinks[0];
+        const now = new Date();
+        let status: 'active' | 'expired' | 'revoked' | 'deleted' = 'active';
+        if (file.isDeleted) {
+          status = 'deleted';
+        } else if (file.expiresAt < now) {
+          status = 'expired';
+        } else if (shareLink?.revokedAt) {
+          status = 'revoked';
+        }
+
+        return {
+          id: file.id,
+          originalFilename: file.originalFilename,
+          mimeType: file.mimeType,
+          sizeBytes: file.sizeBytes.toString(),
+          expiresAt: file.expiresAt.toISOString(),
+          createdAt: file.createdAt.toISOString(),
+          status,
+          ownerUsername: file.owner.username,
+          downloadCount: shareLink?.downloadCount ?? 0,
+          maxDownloads: shareLink?.maxDownloads ?? -1,
+        };
+      });
+
+      res.status(200).json({
+        data: formattedFiles,
+        total,
+        page,
+        limit,
+      });
     } catch (error) {
       next(error);
     }

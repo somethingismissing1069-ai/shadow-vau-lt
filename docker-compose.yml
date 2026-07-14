@@ -23,10 +23,13 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
     expose:
       - "3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://api:3001
+      - NEXT_PUBLIC_API_URL=
+      - BACKEND_URL=http://api:3001
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
@@ -36,12 +39,13 @@ services:
 
   api:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     expose:
       - "3001"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://sv:${DB_PASSWORD}@db:5432/shadowvault
@@ -49,13 +53,15 @@ services:
       - RSA_PRIVATE_KEY_PATH=/run/secrets/rsa_private_key
       - UPLOAD_DIR=/data/encrypted
       - MAX_UPLOAD_BYTES=104857600
-      - CORS_ORIGINS=https://${DOMAIN}
+      - CORS_ORIGINS=https://${DOMAIN},http://${DOMAIN}:3000,http://localhost:3000
+      - ALLOW_INSECURE_COOKIES=true
+      - DISABLE_RATE_LIMIT=true
       - BASE_URL=https://${DOMAIN}
       - PORT=3001
       - JWT_ACCESS_EXPIRES_IN=900
       - JWT_REFRESH_EXPIRES_IN=604800
       - RATE_LIMIT_WINDOW_MS=60000
-      - RATE_LIMIT_MAX_REQUESTS=100
+      - RATE_LIMIT_MAX_REQUESTS=1000
       - EXPIRY_CRON_SCHEDULE=*/5 * * * *
     volumes:
       - encrypted_files:/data/encrypted
@@ -87,18 +93,27 @@ services:
 
   expiry-worker:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     command: ["node", "dist/workers/expiry.js"]
     depends_on:
-      - db
+      api:
+        condition: service_healthy
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://sv:${DB_PASSWORD}@db:5432/shadowvault
       - UPLOAD_DIR=/data/encrypted
       - EXPIRY_CRON_SCHEDULE=*/5 * * * *
+      - JWT_SECRET=${JWT_SECRET}
+      - RSA_PRIVATE_KEY_PATH=/run/secrets/rsa_private_key
+      - MAX_UPLOAD_BYTES=104857600
+      - CORS_ORIGINS=https://${DOMAIN}
+      - BASE_URL=https://${DOMAIN}
+      - PORT=3001
     volumes:
       - encrypted_files:/data/encrypted
+    secrets:
+      - rsa_private_key
     restart: unless-stopped
 
 volumes:

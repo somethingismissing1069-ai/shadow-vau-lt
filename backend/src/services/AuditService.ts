@@ -83,12 +83,20 @@ export class AuditService implements IAuditService {
         orderBy: { createdAt: 'desc' },
         skip,
         take: sanitizedLimit,
+        include: {
+          file: {
+            select: { originalFilename: true },
+          },
+        },
       }),
       this.prisma.auditLog.count({ where }),
     ]);
 
     return {
-      logs: logs.map(this.mapToAuditLogEntry),
+      logs: logs.map((log) => ({
+        ...this.mapToAuditLogEntry(log),
+        fileName: log.file?.originalFilename || null,
+      })),
       total,
       page: sanitizedPage,
       limit: sanitizedLimit,
@@ -137,12 +145,20 @@ export class AuditService implements IAuditService {
         orderBy: { createdAt: 'desc' },
         skip,
         take: sanitizedLimit,
+        include: {
+          file: {
+            select: { originalFilename: true },
+          },
+        },
       }),
       this.prisma.auditLog.count({ where }),
     ]);
 
     return {
-      logs: logs.map(this.mapToAuditLogEntry),
+      logs: logs.map((log) => ({
+        ...this.mapToAuditLogEntry(log),
+        fileName: log.file?.originalFilename || null,
+      })),
       total,
       page: sanitizedPage,
       limit: sanitizedLimit,

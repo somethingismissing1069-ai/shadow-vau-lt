@@ -7,13 +7,8 @@ import { Input } from '@/components/ui/Input';
 import { Card } from '@/components/ui/Card';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { api, getApiError } from '@/lib/api';
-
-type DownloadState = 'idle' | 'password_required' | 'downloading' | 'success' | 'error';
-
-interface DownloadError {
-  code: string;
-  message: string;
-}
+import { isTerminalShareError } from '@/types/api';
+import type { SharePageState } from '@/types/index';
 
 const ERROR_MESSAGES: Record<string, { title: string; description: string }> = {
   LINK_EXPIRED: {
@@ -42,18 +37,16 @@ const ERROR_MESSAGES: Record<string, { title: string; description: string }> = {
   },
 };
 
-export default function DownloadPage() {
+export default function SharePage() {
   const params = useParams();
   const token = params.token as string;
 
-  const [state, setState] = useState<DownloadState>('idle');
+  const [state, setState] = useState<SharePageState>({ phase: 'ready' });
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<DownloadError | null>(null);
   const [passwordError, setPasswordError] = useState('');
 
   const handleDownload = useCallback(async (sharePassword?: string) => {
-    setState('downloading');
-    setError(null);
+    setState({ phase: 'downloading' });
     setPasswordError('');
 
     try {
@@ -88,27 +81,30 @@ export default function DownloadPage() {
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
 
-      setState('success');
+      setState({ phase: 'success', filename });
     } catch (err: unknown) {
       const apiError = getApiError(err);
 
       if (apiError.error === 'INVALID_SHARE_PASSWORD') {
-        setState('password_required');
-        setPasswordError('Incorrect password. Please try again.');
+        // Determine attempt number: if already in password-required state, increment; otherwise start at 1
+        setState((prev) => {
+          const attempt = prev.phase === 'password-required' ? (prev.attempt ?? 0) + 1 : 1;
+          return { phase: 'password-required', attempt };
+        });
+        if (sharePassword) {
+          setPasswordError('Incorrect password. Please try again.');
+        }
         return;
       }
 
-      // If we get a 403 that indicates password is required (first attempt without password)
-      if (apiError.error === 'INVALID_SHARE_PASSWORD' || 
-          (apiError.message && apiError.message.toLowerCase().includes('password'))) {
-        setState('password_required');
-        return;
-      }
+      const errorCode = apiError.error || 'UNKNOWN_ERROR';
+      const retryable = !isTerminalShareError(errorCode);
 
-      setState('error');
-      setError({
-        code: apiError.error,
-        message: apiError.message,
+      setState({
+        phase: 'error',
+        errorCode,
+        message: apiError.message || 'An unexpected error occurred.',
+        retryable,
       });
     }
   }, [token]);
@@ -120,13 +116,15 @@ export default function DownloadPage() {
   const handlePasswordSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (!password.trim()) {
-      setPasswordError('Please enter a password');
+      setPasswordError('Password is required');
       return;
     }
     handleDownload(password);
   }, [password, handleDownload]);
 
-  const errorInfo = error ? ERROR_MESSAGES[error.code] : null;
+  const handleRetry = useCallback(() => {
+    setState({ phase: 'ready' });
+  }, []);
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-6">
@@ -142,8 +140,8 @@ export default function DownloadPage() {
         </div>
 
         <Card className="p-8">
-          {/* Idle state - Initial download button */}
-          {state === 'idle' && (
+          {/* Ready state - Initial download button */}
+          {state.phase === 'ready' && (
             <div className="text-center space-y-6">
               <div className="mx-auto w-16 h-16 rounded-full bg-text-accent/10 flex items-center justify-center">
                 <svg
@@ -179,7 +177,7 @@ export default function DownloadPage() {
           )}
 
           {/* Password required state */}
-          {state === 'password_required' && (
+          {state.phase === 'password-required' && (
             <div className="space-y-6">
               <div className="text-center">
                 <div className="mx-auto w-16 h-16 rounded-full bg-status-warning/10 flex items-center justify-center mb-4">
@@ -201,7 +199,9 @@ export default function DownloadPage() {
                   Password Required
                 </h2>
                 <p className="text-text-secondary text-sm">
-                  This file is password-protected. Enter the password to download.
+                  {state.attempt && state.attempt > 1
+                    ? 'Incorrect password. Please try again.'
+                    : 'This file is password-protected. Enter the password to download.'}
                 </p>
               </div>
               <form onSubmit={handlePasswordSubmit} className="space-y-4">
@@ -222,14 +222,14 @@ export default function DownloadPage() {
                   size="lg"
                   className="w-full"
                 >
-                  Unlock & Download
+                  Unlock &amp; Download
                 </Button>
               </form>
             </div>
           )}
 
           {/* Downloading state */}
-          {state === 'downloading' && (
+          {state.phase === 'downloading' && (
             <div className="text-center space-y-6 py-4">
               <LoadingSpinner size="lg" />
               <div>
@@ -244,7 +244,7 @@ export default function DownloadPage() {
           )}
 
           {/* Success state */}
-          {state === 'success' && (
+          {state.phase === 'success' && (
             <div className="text-center space-y-6">
               <div className="mx-auto w-16 h-16 rounded-full bg-status-success/10 flex items-center justify-center">
                 <svg
@@ -266,14 +266,14 @@ export default function DownloadPage() {
                   Download Complete
                 </h2>
                 <p className="text-text-secondary text-sm">
-                  Your file has been successfully downloaded and decrypted.
+                  <span className="font-medium text-text-primary">{state.filename}</span> has been successfully downloaded and decrypted.
                 </p>
               </div>
             </div>
           )}
 
           {/* Error state */}
-          {state === 'error' && error && (
+          {state.phase === 'error' && (
             <div className="text-center space-y-6">
               <div className="mx-auto w-16 h-16 rounded-full bg-status-error/10 flex items-center justify-center">
                 <svg
@@ -292,19 +292,15 @@ export default function DownloadPage() {
               </div>
               <div>
                 <h2 className="text-xl font-semibold text-text-primary mb-2">
-                  {errorInfo?.title || 'Download Failed'}
+                  {ERROR_MESSAGES[state.errorCode]?.title || 'Download Failed'}
                 </h2>
                 <p className="text-text-secondary text-sm">
-                  {errorInfo?.description || error.message || 'An unexpected error occurred.'}
+                  {ERROR_MESSAGES[state.errorCode]?.description || state.message}
                 </p>
               </div>
-              {error.code !== 'LINK_EXPIRED' &&
-               error.code !== 'TOKEN_REVOKED' &&
-               error.code !== 'FILE_BURNED' &&
-               error.code !== 'DOWNLOAD_LIMIT_REACHED' &&
-               error.code !== 'TOKEN_NOT_FOUND' && (
+              {state.retryable && (
                 <Button
-                  onClick={handleInitialDownload}
+                  onClick={handleRetry}
                   variant="secondary"
                   size="lg"
                   className="w-full"

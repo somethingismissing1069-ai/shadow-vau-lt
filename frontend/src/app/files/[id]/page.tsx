@@ -95,7 +95,7 @@ export default function FileDetailsPage() {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-bg-primary">
-        <Navbar isAuthenticated={true} />
+        <Navbar />
         <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-24 pb-12">
           <div className="flex justify-center py-16">
             <LoadingSpinner size="lg" />
@@ -108,7 +108,7 @@ export default function FileDetailsPage() {
   if (error || !file) {
     return (
       <div className="min-h-screen bg-bg-primary">
-        <Navbar isAuthenticated={true} />
+        <Navbar />
         <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-24 pb-12">
           <Card className="text-center py-12">
             <AlertTriangle className="h-12 w-12 text-status-error mx-auto mb-4" />
@@ -131,7 +131,7 @@ export default function FileDetailsPage() {
 
   return (
     <div className="min-h-screen bg-bg-primary">
-      <Navbar isAuthenticated={true} />
+      <Navbar />
 
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-24 pb-12">
         {/* Back Navigation */}

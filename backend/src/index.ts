@@ -3,7 +3,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import pino from 'pino';
 import { globalRateLimiter, authenticate, adminMiddleware } from './middleware';
-import { authRouter, createShareRouter, createAuditRouter, createAdminRouter, healthRouter } from './routes';
+import { authRouter, createFileRoutes, createShareRouter, createAuditRouter, createAdminRouter, healthRouter } from './routes';
 import { AppError } from './errors';
 import { EncryptionService } from './services/EncryptionService';
 import { AuthService } from './services/AuthService';
@@ -20,6 +20,9 @@ const logger = pino({
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Trust proxy (nginx) for correct client IP in rate limiters and logging
+app.set('trust proxy', 1);
 
 // Security middleware
 app.use(helmet({
@@ -42,7 +45,7 @@ app.use(helmet({
 }));
 
 app.use(cors({
-  origin: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:3000'],
+  origin: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:3000', 'https://localhost'],
   credentials: true,
 }));
 
@@ -72,6 +75,9 @@ app.use('/api/auth', authRouter);
 
 // Share download (no auth, has its own rate limiter) – Requirement 5.1
 app.use('/api/share', createShareRouter(fileService));
+
+// File routes (authenticated) – Requirements 3.5, 9.1, 9.2, 9.3
+app.use('/api/files', createFileRoutes(fileService, authService));
 
 // User audit logs (authenticated) – Requirement 8.4
 app.use('/api/audit', authenticate(authService), createAuditRouter(auditService));

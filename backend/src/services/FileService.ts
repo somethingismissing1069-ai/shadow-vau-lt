@@ -156,18 +156,20 @@ export class FileService implements IFileService {
     // 4. Sanitize filename
     const sanitizedFilename = sanitizeFilename(file.originalname);
 
-    // 5. Determine recipient public key: use provided key or fetch owner's from DB
+    // 5. Determine recipient public key: use the server's RSA key pair for encryption
+    // The server's private key is at RSA_PRIVATE_KEY_PATH; derive the public key from it.
+    // This ensures the server can decrypt files on download using the same private key.
     let recipientPublicKey = params.recipientPublicKey;
     if (!recipientPublicKey) {
-      const owner = await this.prisma.user.findUnique({
-        where: { id: ownerId },
-        select: { rsaPublicKey: true },
-      });
-
-      if (!owner) {
-        throw new ValidationError('Owner not found');
+      const privateKeyPath = config.RSA_PRIVATE_KEY_PATH;
+      try {
+        const privateKeyPem = await fs.readFile(privateKeyPath, 'utf-8');
+        const privateKeyObject = crypto.createPrivateKey(privateKeyPem);
+        const publicKeyObject = crypto.createPublicKey(privateKeyObject);
+        recipientPublicKey = publicKeyObject.export({ type: 'spki', format: 'pem' }) as string;
+      } catch {
+        throw new ValidationError('Server encryption key not available');
       }
-      recipientPublicKey = owner.rsaPublicKey;
     }
 
     // 6. Encrypt file buffer using recipient's public key
@@ -244,6 +246,8 @@ export class FileService implements IFileService {
           eventType: 'UPLOAD',
           fileId,
           userId: ownerId,
+          ipAddress: params.ipAddress || null,
+          userAgent: params.userAgent || null,
           metadata: {
             originalFilename: sanitizedFilename,
             sizeBytes: file.size,
@@ -399,6 +403,8 @@ export class FileService implements IFileService {
     await this.auditService.recordEvent({
       eventType: 'DOWNLOAD',
       fileId: link.fileId,
+      ipAddress: request.ipAddress,
+      userAgent: request.userAgent,
     });
 
     // 13. Burn if burnAfterReading or downloadOnce

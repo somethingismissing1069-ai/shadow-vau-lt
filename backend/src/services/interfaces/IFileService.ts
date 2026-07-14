@@ -16,6 +16,8 @@ export interface UploadFileParams {
   burnAfterReading: boolean;
   password?: string;
   maxDownloads?: number;
+  ipAddress?: string;
+  userAgent?: string;
 }
 
 /**
@@ -34,6 +36,8 @@ export interface UploadFileResult {
 export interface DownloadFileParams {
   token: string;
   password?: string;
+  ipAddress?: string;
+  userAgent?: string;
 }
 
 /**

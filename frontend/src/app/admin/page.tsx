@@ -1,7 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Users,
@@ -13,43 +12,27 @@ import {
   ChevronLeft,
   ChevronRight,
   AlertTriangle,
-  Upload,
-  Download,
-  Flame,
-  LogIn,
-  LogOut,
-  Timer,
+  RefreshCw,
+  FolderOpen,
+  CheckCircle,
+  X,
 } from 'lucide-react';
-import { Card, LoadingSpinner, Button, Modal } from '@/components/ui';
-import { useAuth } from '@/hooks/useAuth';
+import { Card, LoadingSpinner, Button, ConfirmDialog } from '@/components/ui';
+import { EventBadge } from '@/components/ui/EventBadge';
+import { ProtectedRoute } from '@/components/auth';
+import { useAuth } from '@/contexts/AuthContext';
+import { useToast } from '@/contexts/ToastContext';
 import { api, getApiError } from '@/lib/api';
+import { queryKeys } from '@/lib/queryKeys';
+import type {
+  AdminUser,
+  AdminAuditFilters,
+  AuditEventType,
+  AuditLogEntry,
+  PaginatedResponse,
+} from '@/types';
 
-// Types
-interface AdminUser {
-  id: string;
-  email: string;
-  username: string;
-  isAdmin: boolean;
-  createdAt: string;
-  lastLoginAt: string | null;
-  fileCount: number;
-}
-
-interface AdminAuditLog {
-  id: string;
-  fileId: string | null;
-  userId: string | null;
-  eventType: string;
-  ipAddress: string | null;
-  userAgent: string | null;
-  metadata: Record<string, unknown> | null;
-  createdAt: string;
-  userName?: string;
-  fileName?: string;
-}
-
-const EVENT_TYPES = [
-  'ALL',
+const ALL_AUDIT_EVENT_TYPES: AuditEventType[] = [
   'UPLOAD',
   'DOWNLOAD',
   'EXPIRE',
@@ -58,82 +41,159 @@ const EVENT_TYPES = [
   'FAIL_ATTEMPT',
   'LOGIN',
   'LOGOUT',
-] as const;
+  'PASSWORD_RESET',
+  'LINK_CREATED',
+  'LINK_REVOKED',
+];
 
-type EventType = (typeof EVENT_TYPES)[number];
+type AdminTab = 'users' | 'audit' | 'files';
 
-type AdminTab = 'users' | 'audit';
+// Types for admin file list
+interface AdminFile {
+  id: string;
+  originalFilename: string;
+  mimeType: string;
+  sizeBytes: string;
+  expiresAt: string;
+  createdAt: string;
+  status: 'active' | 'expired' | 'revoked';
+  ownerUsername: string;
+  downloadCount: number;
+  maxDownloads: number;
+}
 
-const eventTypeConfig: Record<
-  string,
-  { icon: React.ElementType; color: string; label: string }
-> = {
-  UPLOAD: { icon: Upload, color: 'text-status-info', label: 'Upload' },
-  DOWNLOAD: { icon: Download, color: 'text-status-success', label: 'Download' },
-  EXPIRE: { icon: Timer, color: 'text-status-warning', label: 'Expire' },
-  DELETE: { icon: Trash2, color: 'text-status-error', label: 'Delete' },
-  BURN: { icon: Flame, color: 'text-status-error', label: 'Burn' },
-  FAIL_ATTEMPT: {
-    icon: AlertTriangle,
-    color: 'text-status-warning',
-    label: 'Failed Attempt',
-  },
-  LOGIN: { icon: LogIn, color: 'text-status-info', label: 'Login' },
-  LOGOUT: { icon: LogOut, color: 'text-text-secondary', label: 'Logout' },
-};
-
-export default function AdminPanel() {
-  const router = useRouter();
+function AdminPanelContent() {
   const queryClient = useQueryClient();
-  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated } = useAuth();
+  const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<AdminTab>('users');
-  const [selectedEventType, setSelectedEventType] = useState<EventType>('ALL');
   const [auditPage, setAuditPage] = useState(1);
+  const [usersPage, setUsersPage] = useState(1);
+  const [filesPage, setFilesPage] = useState(1);
   const [deleteFileId, setDeleteFileId] = useState<string | null>(null);
+  const [deleteFileName, setDeleteFileName] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const ITEMS_PER_PAGE = 20;
+  // File management notifications
+  const [fileSuccessMessage, setFileSuccessMessage] = useState<string | null>(null);
+  const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null);
 
+  // Audit filter state
+  const [auditFilters, setAuditFilters] = useState<AdminAuditFilters>({});
+  const [filterEventType, setFilterEventType] = useState<string>('');
+  const [filterUserId, setFilterUserId] = useState('');
+  const [filterFileId, setFilterFileId] = useState('');
+  const [filterStartDate, setFilterStartDate] = useState('');
+  const [filterEndDate, setFilterEndDate] = useState('');
+
+  const ITEMS_PER_PAGE = 50;
+
+  // Auto-dismiss success notification after 5 seconds
   useEffect(() => {
-    if (!authLoading && (!isAuthenticated || !user?.isAdmin)) {
-      router.push('/login');
+    if (fileSuccessMessage) {
+      const timer = setTimeout(() => {
+        setFileSuccessMessage(null);
+      }, 5000);
+      return () => clearTimeout(timer);
     }
-  }, [isAuthenticated, authLoading, user, router]);
+  }, [fileSuccessMessage]);
 
-  // Fetch users
+  // Fetch users with pagination
   const {
-    data: users,
+    data: usersData,
     isLoading: usersLoading,
     error: usersError,
-  } = useQuery<AdminUser[]>({
-    queryKey: ['admin', 'users'],
+  } = useQuery<PaginatedResponse<AdminUser>>({
+    queryKey: queryKeys.admin.users(usersPage, ITEMS_PER_PAGE),
     queryFn: async () => {
-      const response = await api.get('/admin/users');
-      return response.data;
+      const response = await api.get('/admin/users', {
+        params: { page: usersPage, limit: ITEMS_PER_PAGE },
+      });
+      // Backend returns { users, total, page, limit } — normalize to PaginatedResponse { data, total, page, limit }
+      const raw = response.data;
+      return { data: raw.users || raw.data || [], total: raw.total, page: raw.page, limit: raw.limit };
     },
     enabled: isAuthenticated && user?.isAdmin === true,
   });
 
-  // Fetch admin audit logs
+  // Fetch admin audit logs with filters
   const {
-    data: auditLogs,
+    data: auditData,
     isLoading: auditLoading,
     error: auditError,
-  } = useQuery<AdminAuditLog[]>({
-    queryKey: ['admin', 'audit', selectedEventType, auditPage],
+    refetch: refetchAudit,
+  } = useQuery<PaginatedResponse<AuditLogEntry>>({
+    queryKey: queryKeys.admin.audit(auditPage, auditFilters),
     queryFn: async () => {
       const params: Record<string, string | number> = {
         page: auditPage,
         limit: ITEMS_PER_PAGE,
       };
-      if (selectedEventType !== 'ALL') {
-        params.eventType = selectedEventType;
+      if (auditFilters.eventType) {
+        params.eventType = auditFilters.eventType;
+      }
+      if (auditFilters.userId) {
+        params.userId = auditFilters.userId;
+      }
+      if (auditFilters.fileId) {
+        params.fileId = auditFilters.fileId;
+      }
+      if (auditFilters.startDate) {
+        params.startDate = auditFilters.startDate;
+      }
+      if (auditFilters.endDate) {
+        params.endDate = auditFilters.endDate;
       }
       const response = await api.get('/admin/audit', { params });
-      return response.data;
+      // Backend returns { logs, total, page, limit } — normalize to { data, total, page, limit }
+      const raw = response.data;
+      return { data: raw.logs || raw.data || [], total: raw.total, page: raw.page, limit: raw.limit };
     },
     enabled: isAuthenticated && user?.isAdmin === true && activeTab === 'audit',
   });
+
+  // Fetch admin files list
+  const {
+    data: filesData,
+    isLoading: filesLoading,
+    error: filesError,
+  } = useQuery<PaginatedResponse<AdminFile>>({
+    queryKey: ['admin', 'files', filesPage, ITEMS_PER_PAGE],
+    queryFn: async () => {
+      const response = await api.get('/admin/files', {
+        params: { page: filesPage, limit: ITEMS_PER_PAGE },
+      });
+      return response.data;
+    },
+    enabled: isAuthenticated && user?.isAdmin === true && activeTab === 'files',
+  });
+
+  const handleApplyFilters = () => {
+    const newFilters: AdminAuditFilters = {};
+    if (filterEventType) {
+      newFilters.eventType = filterEventType as AuditEventType;
+    }
+    if (filterUserId.trim()) {
+      newFilters.userId = filterUserId.trim();
+    }
+    if (filterFileId.trim()) {
+      newFilters.fileId = filterFileId.trim();
+    }
+    if (filterStartDate) {
+      newFilters.startDate = new Date(filterStartDate).toISOString();
+    }
+    if (filterEndDate) {
+      newFilters.endDate = new Date(filterEndDate).toISOString();
+    }
+    setAuditFilters(newFilters);
+    setAuditPage(1);
+  };
+
+  const auditLogs = auditData?.data ?? [];
+  const totalAuditEntries = auditData?.total ?? 0;
+  const totalAuditPages = auditData
+    ? Math.ceil(auditData.total / auditData.limit)
+    : 1;
 
   // Force delete mutation
   const forceDeleteMutation = useMutation({
@@ -141,27 +201,40 @@ export default function AdminPanel() {
       await api.delete(`/admin/files/${fileId}`);
     },
     onSuccess: () => {
+      const deletedName = deleteFileName || 'File';
       setDeleteFileId(null);
+      setDeleteFileName(null);
       setDeleteError(null);
+      setFileErrorMessage(null);
+      setFileSuccessMessage(`"${deletedName}" has been deleted successfully.`);
+      showToast(`"${deletedName}" has been deleted successfully.`, 'success');
+      queryClient.invalidateQueries({ queryKey: ['admin', 'files'] });
       queryClient.invalidateQueries({ queryKey: ['admin'] });
     },
     onError: (error) => {
       const apiError = getApiError(error);
-      setDeleteError(apiError.message);
+      setDeleteFileId(null);
+      setDeleteFileName(null);
+      setDeleteError(null);
+      setFileErrorMessage(apiError.message || 'Failed to delete file.');
+      showToast(apiError.message || 'Failed to delete file', 'error');
     },
   });
 
-  if (authLoading) {
-    return (
-      <main className="flex min-h-screen items-center justify-center">
-        <LoadingSpinner size="lg" />
-      </main>
-    );
-  }
+  const totalUsersPages = usersData
+    ? Math.ceil(usersData.total / usersData.limit)
+    : 1;
 
-  if (!isAuthenticated || !user?.isAdmin) {
-    return null;
-  }
+  const totalFilesPages = filesData
+    ? Math.ceil(filesData.total / filesData.limit)
+    : 1;
+
+  const formatFileSize = useCallback((bytes: string | number) => {
+    const numBytes = typeof bytes === 'string' ? parseInt(bytes, 10) : bytes;
+    if (numBytes < 1024) return `${numBytes} B`;
+    if (numBytes < 1024 * 1024) return `${(numBytes / 1024).toFixed(1)} KB`;
+    return `${(numBytes / (1024 * 1024)).toFixed(1)} MB`;
+  }, []);
 
   return (
     <main className="min-h-screen pt-20 pb-12 px-4">
@@ -182,8 +255,10 @@ export default function AdminPanel() {
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-2 border-b border-border-glass pb-0">
+        <div className="flex gap-2 border-b border-border-glass pb-0" role="tablist" aria-label="Admin panel tabs">
           <button
+            role="tab"
+            aria-selected={activeTab === 'users'}
             onClick={() => setActiveTab('users')}
             className={`
               flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all -mb-px
@@ -198,6 +273,8 @@ export default function AdminPanel() {
             Users
           </button>
           <button
+            role="tab"
+            aria-selected={activeTab === 'audit'}
             onClick={() => setActiveTab('audit')}
             className={`
               flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all -mb-px
@@ -209,7 +286,23 @@ export default function AdminPanel() {
             `}
           >
             <FileText className="h-4 w-4" />
-            Global Audit Logs
+            Audit Logs
+          </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'files'}
+            onClick={() => setActiveTab('files')}
+            className={`
+              flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all -mb-px
+              ${
+                activeTab === 'files'
+                  ? 'border-text-accent text-text-accent'
+                  : 'border-transparent text-text-secondary hover:text-text-primary'
+              }
+            `}
+          >
+            <FolderOpen className="h-4 w-4" />
+            File Management
           </button>
         </div>
 
@@ -217,7 +310,7 @@ export default function AdminPanel() {
         {activeTab === 'users' && (
           <Card className="p-0 overflow-hidden">
             {usersLoading ? (
-              <div className="p-12">
+              <div className="p-12 flex justify-center">
                 <LoadingSpinner size="lg" />
               </div>
             ) : usersError ? (
@@ -225,96 +318,117 @@ export default function AdminPanel() {
                 <AlertTriangle className="h-8 w-8 text-status-error mx-auto mb-3" />
                 <p className="text-text-secondary">Failed to load users</p>
               </div>
-            ) : !users || users.length === 0 ? (
+            ) : !usersData || usersData.data.length === 0 ? (
               <div className="p-12 text-center">
                 <Users className="h-12 w-12 text-text-secondary/30 mx-auto mb-4" />
                 <p className="text-text-secondary">No users found</p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-border-glass">
-                      <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                        Username
-                      </th>
-                      <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                        Email
-                      </th>
-                      <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                        Created
-                      </th>
-                      <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                        Last Login
-                      </th>
-                      <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                        Files
-                      </th>
-                      <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                        Role
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border-glass">
-                    {users.map((u) => (
-                      <tr
-                        key={u.id}
-                        className="hover:bg-bg-glass/50 transition-colors"
-                      >
-                        <td className="px-6 py-4">
-                          <span className="text-sm font-medium text-text-primary">
-                            {u.username}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="text-sm text-text-secondary">
-                            {u.email}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="text-sm text-text-secondary">
-                            {new Date(u.createdAt).toLocaleDateString('en-US', {
-                              month: 'short',
-                              day: 'numeric',
-                              year: 'numeric',
-                            })}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="text-sm text-text-secondary">
-                            {u.lastLoginAt
-                              ? new Date(u.lastLoginAt).toLocaleDateString(
-                                  'en-US',
-                                  {
-                                    month: 'short',
-                                    day: 'numeric',
-                                    year: 'numeric',
-                                  }
-                                )
-                              : 'Never'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="text-sm text-text-secondary">
-                            {u.fileCount}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          {u.isAdmin ? (
-                            <span className="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full bg-text-accent/10 text-text-accent border border-text-accent/30">
-                              Admin
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full bg-bg-glass text-text-secondary border border-border-glass">
-                              User
-                            </span>
-                          )}
-                        </td>
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b border-border-glass">
+                        <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                          Email
+                        </th>
+                        <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                          Username
+                        </th>
+                        <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                          Role
+                        </th>
+                        <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                          Created
+                        </th>
+                        <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                          Last Login
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="divide-y divide-border-glass">
+                      {usersData.data.map((u) => (
+                        <tr
+                          key={u.id}
+                          className="hover:bg-bg-glass/50 transition-colors"
+                        >
+                          <td className="px-6 py-4">
+                            <span className="text-sm text-text-secondary">
+                              {u.email}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="text-sm font-medium text-text-primary">
+                              {u.username}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            {u.isAdmin ? (
+                              <span className="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full bg-text-accent/10 text-text-accent border border-text-accent/30">
+                                Admin
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full bg-bg-glass text-text-secondary border border-border-glass">
+                                User
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="text-sm text-text-secondary">
+                              {new Date(u.createdAt).toLocaleDateString('en-US', {
+                                month: 'short',
+                                day: 'numeric',
+                                year: 'numeric',
+                              })}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="text-sm text-text-secondary">
+                              {u.lastLoginAt
+                                ? new Date(u.lastLoginAt).toLocaleDateString(
+                                    'en-US',
+                                    {
+                                      month: 'short',
+                                      day: 'numeric',
+                                      year: 'numeric',
+                                    }
+                                  )
+                                : 'Never'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination */}
+                <div className="flex items-center justify-between px-6 py-4 border-t border-border-glass">
+                  <span className="text-sm text-text-secondary">
+                    Page {usersPage} of {totalUsersPages}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={usersPage <= 1}
+                      onClick={() => setUsersPage((p) => Math.max(1, p - 1))}
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                      Previous
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={usersPage >= totalUsersPages}
+                      onClick={() => setUsersPage((p) => p + 1)}
+                    >
+                      Next
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </>
             )}
           </Card>
         )}
@@ -322,35 +436,118 @@ export default function AdminPanel() {
         {/* Audit Logs Tab */}
         {activeTab === 'audit' && (
           <>
-            {/* Filters */}
+            {/* Filter Form */}
             <Card className="p-4">
-              <div className="flex items-center gap-3 flex-wrap">
+              <div className="space-y-4">
                 <div className="flex items-center gap-2 text-text-secondary">
                   <Filter className="h-4 w-4" />
-                  <span className="text-sm font-medium">
-                    Filter by event:
-                  </span>
+                  <span className="text-sm font-medium">Filters</span>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {EVENT_TYPES.map((type) => (
-                    <button
-                      key={type}
-                      onClick={() => {
-                        setSelectedEventType(type);
-                        setAuditPage(1);
-                      }}
-                      className={`
-                        px-3 py-1.5 text-xs font-medium rounded-lg border transition-all
-                        ${
-                          selectedEventType === type
-                            ? 'bg-text-accent/20 border-text-accent/50 text-text-accent'
-                            : 'bg-bg-glass border-border-glass text-text-secondary hover:text-text-primary hover:border-border-focus'
-                        }
-                      `}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+                  {/* Event Type Dropdown */}
+                  <div>
+                    <label
+                      htmlFor="audit-filter-event-type"
+                      className="block text-xs font-medium text-text-secondary mb-1"
                     >
-                      {type === 'ALL' ? 'All Events' : type.replace('_', ' ')}
-                    </button>
-                  ))}
+                      Event Type
+                    </label>
+                    <select
+                      id="audit-filter-event-type"
+                      value={filterEventType}
+                      onChange={(e) => setFilterEventType(e.target.value)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-border-glass bg-bg-glass text-text-primary focus:outline-none focus:border-border-focus"
+                    >
+                      <option value="">All</option>
+                      {ALL_AUDIT_EVENT_TYPES.map((type) => (
+                        <option key={type} value={type}>
+                          {type.replace(/_/g, ' ')}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* User ID Text Input */}
+                  <div>
+                    <label
+                      htmlFor="audit-filter-user-id"
+                      className="block text-xs font-medium text-text-secondary mb-1"
+                    >
+                      User ID
+                    </label>
+                    <input
+                      id="audit-filter-user-id"
+                      type="text"
+                      value={filterUserId}
+                      onChange={(e) => setFilterUserId(e.target.value)}
+                      placeholder="Filter by user ID"
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-border-glass bg-bg-glass text-text-primary placeholder:text-text-secondary/50 focus:outline-none focus:border-border-focus"
+                    />
+                  </div>
+
+                  {/* File ID Text Input */}
+                  <div>
+                    <label
+                      htmlFor="audit-filter-file-id"
+                      className="block text-xs font-medium text-text-secondary mb-1"
+                    >
+                      File ID
+                    </label>
+                    <input
+                      id="audit-filter-file-id"
+                      type="text"
+                      value={filterFileId}
+                      onChange={(e) => setFilterFileId(e.target.value)}
+                      placeholder="Filter by file ID"
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-border-glass bg-bg-glass text-text-primary placeholder:text-text-secondary/50 focus:outline-none focus:border-border-focus"
+                    />
+                  </div>
+
+                  {/* Start Date */}
+                  <div>
+                    <label
+                      htmlFor="audit-filter-start-date"
+                      className="block text-xs font-medium text-text-secondary mb-1"
+                    >
+                      Start Date
+                    </label>
+                    <input
+                      id="audit-filter-start-date"
+                      type="date"
+                      value={filterStartDate}
+                      onChange={(e) => setFilterStartDate(e.target.value)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-border-glass bg-bg-glass text-text-primary focus:outline-none focus:border-border-focus"
+                    />
+                  </div>
+
+                  {/* End Date */}
+                  <div>
+                    <label
+                      htmlFor="audit-filter-end-date"
+                      className="block text-xs font-medium text-text-secondary mb-1"
+                    >
+                      End Date
+                    </label>
+                    <input
+                      id="audit-filter-end-date"
+                      type="date"
+                      value={filterEndDate}
+                      onChange={(e) => setFilterEndDate(e.target.value)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-border-glass bg-bg-glass text-text-primary focus:outline-none focus:border-border-focus"
+                    />
+                  </div>
+
+                  {/* Apply Button */}
+                  <div className="flex items-end">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={handleApplyFilters}
+                      className="w-full"
+                    >
+                      Apply Filters
+                    </Button>
+                  </div>
                 </div>
               </div>
             </Card>
@@ -358,20 +555,38 @@ export default function AdminPanel() {
             {/* Audit Logs Table */}
             <Card className="p-0 overflow-hidden">
               {auditLoading ? (
-                <div className="p-12">
-                  <LoadingSpinner size="lg" />
+                <div className="divide-y divide-border-glass">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <div key={i} className="px-6 py-4 flex gap-4 animate-pulse">
+                      <div className="h-5 w-20 rounded bg-bg-glass" />
+                      <div className="h-5 w-32 rounded bg-bg-glass" />
+                      <div className="h-5 w-24 rounded bg-bg-glass" />
+                      <div className="h-5 w-28 rounded bg-bg-glass" />
+                      <div className="h-5 w-36 rounded bg-bg-glass" />
+                    </div>
+                  ))}
                 </div>
               ) : auditError ? (
                 <div className="p-8 text-center">
                   <AlertTriangle className="h-8 w-8 text-status-error mx-auto mb-3" />
-                  <p className="text-text-secondary">
+                  <p className="text-text-secondary mb-4">
                     Failed to load audit logs
                   </p>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => refetchAudit()}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-1" />
+                    Retry
+                  </Button>
                 </div>
-              ) : !auditLogs || auditLogs.length === 0 ? (
+              ) : auditLogs.length === 0 ? (
                 <div className="p-12 text-center">
                   <FileText className="h-12 w-12 text-text-secondary/30 mx-auto mb-4" />
-                  <p className="text-text-secondary">No audit events found</p>
+                  <p className="text-text-secondary">
+                    No results found for the selected filters
+                  </p>
                 </div>
               ) : (
                 <>
@@ -383,90 +598,75 @@ export default function AdminPanel() {
                             Event
                           </th>
                           <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                            User
+                            User ID
                           </th>
                           <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                            Timestamp
-                          </th>
-                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                            File
+                            File ID
                           </th>
                           <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
                             IP Address
                           </th>
                           <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                            Actions
+                            Timestamp
+                          </th>
+                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                            Metadata
                           </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border-glass">
-                        {auditLogs.map((log) => {
-                          const config = eventTypeConfig[log.eventType] || {
-                            icon: FileText,
-                            color: 'text-text-secondary',
-                            label: log.eventType,
-                          };
-                          const Icon = config.icon;
-
-                          return (
-                            <tr
-                              key={log.id}
-                              className="hover:bg-bg-glass/50 transition-colors"
-                            >
-                              <td className="px-6 py-4">
-                                <div className="flex items-center gap-2">
-                                  <Icon
-                                    className={`h-4 w-4 ${config.color}`}
-                                  />
-                                  <span className="text-sm font-medium text-text-primary">
-                                    {config.label}
-                                  </span>
-                                </div>
-                              </td>
-                              <td className="px-6 py-4">
-                                <span className="text-sm text-text-secondary">
-                                  {log.userName || log.userId || '-'}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4">
-                                <div className="flex items-center gap-2 text-sm text-text-secondary">
-                                  <Clock className="h-3.5 w-3.5" />
-                                  {new Date(log.createdAt).toLocaleString(
-                                    'en-US',
-                                    {
-                                      month: 'short',
-                                      day: 'numeric',
-                                      hour: '2-digit',
-                                      minute: '2-digit',
-                                    }
+                        {auditLogs.map((log) => (
+                          <tr
+                            key={log.id}
+                            className="hover:bg-bg-glass/50 transition-colors"
+                          >
+                            <td className="px-6 py-4">
+                              <EventBadge eventType={log.eventType} />
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className="text-sm text-text-secondary font-mono">
+                                {log.userId || '-'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className="text-sm text-text-secondary font-mono">
+                                {log.fileId || '-'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className="text-sm text-text-secondary font-mono">
+                                {log.ipAddress || '-'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="flex items-center gap-2 text-sm text-text-secondary">
+                                <Clock className="h-3.5 w-3.5" />
+                                {new Date(log.createdAt).toLocaleString()}
+                              </div>
+                            </td>
+                            <td className="px-6 py-4">
+                              {log.metadata &&
+                              Object.keys(log.metadata).length > 0 ? (
+                                <div className="text-xs text-text-secondary space-y-0.5">
+                                  {Object.entries(log.metadata).map(
+                                    ([key, value]) => (
+                                      <div key={key}>
+                                        <span className="font-medium text-text-primary">
+                                          {key}:
+                                        </span>{' '}
+                                        {String(value)}
+                                      </div>
+                                    )
                                   )}
                                 </div>
-                              </td>
-                              <td className="px-6 py-4">
+                              ) : (
                                 <span className="text-sm text-text-secondary">
-                                  {log.fileName || log.fileId || '-'}
+                                  -
                                 </span>
-                              </td>
-                              <td className="px-6 py-4">
-                                <span className="text-sm text-text-secondary font-mono">
-                                  {log.ipAddress || '-'}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4">
-                                {log.fileId && (
-                                  <Button
-                                    variant="danger"
-                                    size="sm"
-                                    onClick={() => setDeleteFileId(log.fileId)}
-                                  >
-                                    <Trash2 className="h-3 w-3 mr-1" />
-                                    Delete
-                                  </Button>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
+                              )}
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
@@ -474,14 +674,17 @@ export default function AdminPanel() {
                   {/* Pagination */}
                   <div className="flex items-center justify-between px-6 py-4 border-t border-border-glass">
                     <span className="text-sm text-text-secondary">
-                      Page {auditPage}
+                      Page {auditPage} of {totalAuditPages} ({totalAuditEntries}{' '}
+                      total entries)
                     </span>
                     <div className="flex items-center gap-2">
                       <Button
                         variant="ghost"
                         size="sm"
                         disabled={auditPage <= 1}
-                        onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
+                        onClick={() =>
+                          setAuditPage((p) => Math.max(1, p - 1))
+                        }
                       >
                         <ChevronLeft className="h-4 w-4" />
                         Previous
@@ -489,10 +692,180 @@ export default function AdminPanel() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        disabled={
-                          !auditLogs || auditLogs.length < ITEMS_PER_PAGE
-                        }
+                        disabled={auditPage >= totalAuditPages}
                         onClick={() => setAuditPage((p) => p + 1)}
+                      >
+                        Next
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </Card>
+          </>
+        )}
+
+        {/* File Management Tab */}
+        {activeTab === 'files' && (
+          <>
+            {/* Notifications */}
+            {fileSuccessMessage && (
+              <div className="flex items-center gap-3 p-4 rounded-lg bg-status-success/10 border border-status-success/30">
+                <CheckCircle className="h-5 w-5 text-status-success flex-shrink-0" />
+                <p className="text-sm text-status-success flex-1">{fileSuccessMessage}</p>
+                <button
+                  onClick={() => setFileSuccessMessage(null)}
+                  className="text-status-success hover:text-status-success/80"
+                  aria-label="Dismiss success notification"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+
+            {fileErrorMessage && (
+              <div className="flex items-center gap-3 p-4 rounded-lg bg-status-error/10 border border-status-error/30">
+                <AlertTriangle className="h-5 w-5 text-status-error flex-shrink-0" />
+                <p className="text-sm text-status-error flex-1">{fileErrorMessage}</p>
+                <button
+                  onClick={() => setFileErrorMessage(null)}
+                  className="text-status-error hover:text-status-error/80"
+                  aria-label="Dismiss error notification"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+
+            {/* Files Table */}
+            <Card className="p-0 overflow-hidden">
+              {filesLoading ? (
+                <div className="p-12 flex justify-center">
+                  <LoadingSpinner size="lg" />
+                </div>
+              ) : filesError ? (
+                <div className="p-8 text-center">
+                  <AlertTriangle className="h-8 w-8 text-status-error mx-auto mb-3" />
+                  <p className="text-text-secondary">Failed to load files</p>
+                </div>
+              ) : !filesData || filesData.data.length === 0 ? (
+                <div className="p-12 text-center">
+                  <FolderOpen className="h-12 w-12 text-text-secondary/30 mx-auto mb-4" />
+                  <p className="text-text-secondary">No files found</p>
+                </div>
+              ) : (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-border-glass">
+                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                            Filename
+                          </th>
+                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                            Size
+                          </th>
+                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                            Owner
+                          </th>
+                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                            Status
+                          </th>
+                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                            Uploaded
+                          </th>
+                          <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border-glass">
+                        {filesData.data.map((file) => (
+                          <tr
+                            key={file.id}
+                            className="hover:bg-bg-glass/50 transition-colors"
+                          >
+                            <td className="px-6 py-4">
+                              <span className="text-sm font-medium text-text-primary">
+                                {file.originalFilename}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className="text-sm text-text-secondary">
+                                {formatFileSize(file.sizeBytes)}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className="text-sm text-text-secondary">
+                                {file.ownerUsername}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span
+                                className={`inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full border ${
+                                  file.status === 'active'
+                                    ? 'bg-status-success/10 text-status-success border-status-success/30'
+                                    : file.status === 'expired'
+                                      ? 'bg-status-warning/10 text-status-warning border-status-warning/30'
+                                      : 'bg-status-error/10 text-status-error border-status-error/30'
+                                }`}
+                              >
+                                {file.status.charAt(0).toUpperCase() + file.status.slice(1)}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="flex items-center gap-2 text-sm text-text-secondary">
+                                <Clock className="h-3.5 w-3.5" />
+                                {new Date(file.createdAt).toLocaleDateString(
+                                  'en-US',
+                                  {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    year: 'numeric',
+                                  }
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-6 py-4">
+                              <Button
+                                variant="danger"
+                                size="sm"
+                                onClick={() => {
+                                  setDeleteFileId(file.id);
+                                  setDeleteFileName(file.originalFilename);
+                                }}
+                              >
+                                <Trash2 className="h-3 w-3 mr-1" />
+                                Delete
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Pagination */}
+                  <div className="flex items-center justify-between px-6 py-4 border-t border-border-glass">
+                    <span className="text-sm text-text-secondary">
+                      Page {filesPage} of {totalFilesPages}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={filesPage <= 1}
+                        onClick={() => setFilesPage((p) => Math.max(1, p - 1))}
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                        Previous
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={filesPage >= totalFilesPages}
+                        onClick={() => setFilesPage((p) => p + 1)}
                       >
                         Next
                         <ChevronRight className="h-4 w-4" />
@@ -506,53 +879,32 @@ export default function AdminPanel() {
         )}
       </div>
 
-      {/* Force Delete Confirmation Modal */}
-      <Modal
+      {/* File Delete Confirmation Dialog */}
+      <ConfirmDialog
         isOpen={!!deleteFileId}
-        onClose={() => {
+        title="Delete File"
+        message={`Are you sure you want to delete "${deleteFileName || ''}"? This action cannot be undone.`}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        onConfirm={() => {
+          if (deleteFileId) {
+            forceDeleteMutation.mutate(deleteFileId);
+          }
+        }}
+        onCancel={() => {
           setDeleteFileId(null);
+          setDeleteFileName(null);
           setDeleteError(null);
         }}
-        title="Force Delete File"
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-text-secondary">
-            Are you sure you want to force-delete this file? This action will
-            permanently remove the encrypted file, all associated keys, and
-            revoke all share links. This cannot be undone.
-          </p>
-
-          {deleteError && (
-            <div className="p-3 rounded-lg bg-status-error/10 border border-status-error/30">
-              <p className="text-sm text-status-error">{deleteError}</p>
-            </div>
-          )}
-
-          <div className="flex gap-3 justify-end">
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setDeleteFileId(null);
-                setDeleteError(null);
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              isLoading={forceDeleteMutation.isPending}
-              onClick={() => {
-                if (deleteFileId) {
-                  forceDeleteMutation.mutate(deleteFileId);
-                }
-              }}
-            >
-              <Trash2 className="h-4 w-4 mr-1" />
-              Force Delete
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      />
     </main>
+  );
+}
+
+export default function AdminPanel() {
+  return (
+    <ProtectedRoute requireAdmin>
+      <AdminPanelContent />
+    </ProtectedRoute>
   );
 }

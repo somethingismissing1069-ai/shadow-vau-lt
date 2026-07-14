@@ -16,11 +16,13 @@ const authService = new AuthService(prisma, encryptionService);
 /**
  * Cookie configuration for HTTP-only secure cookies.
  * Requirement 13.5: Store JWT tokens in HTTP-only secure cookies.
+ * 
+ * Note: secure is disabled when ALLOW_INSECURE_COOKIES=true (for local Docker dev on http://localhost:3000)
  */
 const COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict' as const,
+  secure: process.env.NODE_ENV === 'production' && process.env.ALLOW_INSECURE_COOKIES !== 'true',
+  sameSite: 'lax' as const,
   path: '/',
 };
 

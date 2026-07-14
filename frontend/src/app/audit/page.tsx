@@ -1,249 +1,229 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import {
-  FileText,
-  Filter,
-  Clock,
-  Download,
-  Upload,
-  Trash2,
-  Flame,
-  AlertTriangle,
-  LogIn,
-  LogOut,
-  Timer,
-} from 'lucide-react';
-import { Card, LoadingSpinner, Button } from '@/components/ui';
-import { useAuth } from '@/hooks/useAuth';
+import { ProtectedRoute } from '@/components/auth';
+import { Card, Button } from '@/components/ui';
 import { api } from '@/lib/api';
+import { queryKeys } from '@/lib/queryKeys';
+import type { AuditLogEntry, PaginatedResponse, AuditEventType } from '@/types';
 
-interface AuditLogEntry {
-  id: string;
-  fileId: string | null;
-  userId: string | null;
-  eventType: string;
-  ipAddress: string | null;
-  userAgent: string | null;
-  metadata: Record<string, unknown> | null;
-  createdAt: string;
-  fileName?: string;
-}
-
-const EVENT_TYPES = [
-  'ALL',
-  'UPLOAD',
-  'DOWNLOAD',
-  'EXPIRE',
-  'DELETE',
-  'BURN',
-  'FAIL_ATTEMPT',
-  'LOGIN',
-  'LOGOUT',
-] as const;
-
-type EventType = (typeof EVENT_TYPES)[number];
-
-const eventTypeConfig: Record<
-  string,
-  { icon: React.ElementType; color: string; label: string }
-> = {
-  UPLOAD: { icon: Upload, color: 'text-status-info', label: 'Upload' },
-  DOWNLOAD: { icon: Download, color: 'text-status-success', label: 'Download' },
-  EXPIRE: { icon: Timer, color: 'text-status-warning', label: 'Expire' },
-  DELETE: { icon: Trash2, color: 'text-status-error', label: 'Delete' },
-  BURN: { icon: Flame, color: 'text-status-error', label: 'Burn' },
-  FAIL_ATTEMPT: {
-    icon: AlertTriangle,
-    color: 'text-status-warning',
-    label: 'Failed Attempt',
-  },
-  LOGIN: { icon: LogIn, color: 'text-status-info', label: 'Login' },
-  LOGOUT: { icon: LogOut, color: 'text-text-secondary', label: 'Logout' },
+const EVENT_TYPE_COLORS: Record<AuditEventType, string> = {
+  UPLOAD: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+  DOWNLOAD: 'bg-green-500/20 text-green-400 border-green-500/30',
+  DELETE: 'bg-red-500/20 text-red-400 border-red-500/30',
+  BURN: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+  EXPIRE: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+  FAIL_ATTEMPT: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  LOGIN: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30',
+  LOGOUT: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
+  PASSWORD_RESET: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
+  LINK_CREATED: 'bg-teal-500/20 text-teal-400 border-teal-500/30',
+  LINK_REVOKED: 'bg-rose-500/20 text-rose-400 border-rose-500/30',
 };
 
-export default function AuditLogsPage() {
-  const router = useRouter();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
-  const [selectedEventType, setSelectedEventType] = useState<EventType>('ALL');
+function EventTypeBadge({ eventType }: { eventType: AuditEventType }) {
+  const colorClasses = EVENT_TYPE_COLORS[eventType] || 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+  return (
+    <span
+      className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium border ${colorClasses}`}
+      data-testid={`event-badge-${eventType}`}
+    >
+      {eventType.replace(/_/g, ' ')}
+    </span>
+  );
+}
 
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login');
-    }
-  }, [isAuthenticated, authLoading, router]);
+function AuditPageContent() {
+  const [page, setPage] = useState(1);
+  const limit = 50;
 
   const {
-    data: auditLogs,
+    data,
     isLoading,
+    isError,
     error,
-  } = useQuery<AuditLogEntry[]>({
-    queryKey: ['auditLogs', selectedEventType],
+    refetch,
+  } = useQuery<PaginatedResponse<AuditLogEntry>>({
+    queryKey: queryKeys.audit.user(page, limit),
     queryFn: async () => {
-      const params: Record<string, string> = {};
-      if (selectedEventType !== 'ALL') {
-        params.eventType = selectedEventType;
-      }
-      const response = await api.get('/audit', { params });
-      return response.data;
+      const response = await api.get('/audit', {
+        params: { page, limit },
+      });
+      // Backend returns { logs, total, page, limit } — normalize to { data, total, page, limit }
+      const raw = response.data;
+      return { data: raw.logs || raw.data || [], total: raw.total, page: raw.page, limit: raw.limit };
     },
-    enabled: isAuthenticated,
   });
 
-  if (authLoading) {
+  const totalPages = data ? Math.ceil(data.total / limit) : 0;
+  const entries = data?.data ?? [];
+
+  // Loading state with skeleton rows
+  if (isLoading) {
     return (
-      <main className="flex min-h-screen items-center justify-center">
-        <LoadingSpinner size="lg" />
+      <main className="min-h-screen pt-20 pb-12 px-4">
+        <div className="max-w-6xl mx-auto space-y-6">
+          <div>
+            <h1 className="text-3xl font-bold text-text-primary mb-2">Audit Logs</h1>
+            <p className="text-text-secondary">Review your security events and file activity</p>
+          </div>
+          <Card className="p-0 overflow-hidden">
+            <div className="divide-y divide-border-glass">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="px-6 py-4 flex items-center gap-4 animate-pulse">
+                  <div className="h-6 w-24 bg-gray-700/50 rounded-md" />
+                  <div className="h-5 w-32 bg-gray-700/50 rounded" />
+                  <div className="h-5 w-40 bg-gray-700/50 rounded" />
+                  <div className="h-5 w-28 bg-gray-700/50 rounded" />
+                  <div className="h-5 w-48 bg-gray-700/50 rounded flex-1" />
+                </div>
+              ))}
+            </div>
+          </Card>
+        </div>
       </main>
     );
   }
 
-  if (!isAuthenticated) {
-    return null;
+  // Error state with retry
+  if (isError) {
+    return (
+      <main className="min-h-screen pt-20 pb-12 px-4">
+        <div className="max-w-6xl mx-auto space-y-6">
+          <div>
+            <h1 className="text-3xl font-bold text-text-primary mb-2">Audit Logs</h1>
+            <p className="text-text-secondary">Review your security events and file activity</p>
+          </div>
+          <Card className="p-8">
+            <div className="text-center">
+              <p className="text-status-error mb-4">
+                {error instanceof Error ? error.message : 'Failed to load audit logs'}
+              </p>
+              <Button onClick={() => refetch()} variant="primary">
+                Retry
+              </Button>
+            </div>
+          </Card>
+        </div>
+      </main>
+    );
+  }
+
+  // Empty state
+  if (entries.length === 0) {
+    return (
+      <main className="min-h-screen pt-20 pb-12 px-4">
+        <div className="max-w-6xl mx-auto space-y-6">
+          <div>
+            <h1 className="text-3xl font-bold text-text-primary mb-2">Audit Logs</h1>
+            <p className="text-text-secondary">Review your security events and file activity</p>
+          </div>
+          <Card className="p-12">
+            <div className="text-center">
+              <p className="text-text-secondary text-lg">
+                No security events have been recorded
+              </p>
+            </div>
+          </Card>
+        </div>
+      </main>
+    );
   }
 
   return (
     <main className="min-h-screen pt-20 pb-12 px-4">
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Page Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-bold text-text-primary mb-2">
-              Audit Logs
-            </h1>
-            <p className="text-text-secondary">
-              Review your security events and file activity
-            </p>
-          </div>
+        <div>
+          <h1 className="text-3xl font-bold text-text-primary mb-2">Audit Logs</h1>
+          <p className="text-text-secondary">Review your security events and file activity</p>
         </div>
-
-        {/* Filters */}
-        <Card className="p-4">
-          <div className="flex items-center gap-3 flex-wrap">
-            <div className="flex items-center gap-2 text-text-secondary">
-              <Filter className="h-4 w-4" />
-              <span className="text-sm font-medium">Filter by event:</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {EVENT_TYPES.map((type) => (
-                <button
-                  key={type}
-                  onClick={() => setSelectedEventType(type)}
-                  className={`
-                    px-3 py-1.5 text-xs font-medium rounded-lg border transition-all
-                    ${
-                      selectedEventType === type
-                        ? 'bg-text-accent/20 border-text-accent/50 text-text-accent'
-                        : 'bg-bg-glass border-border-glass text-text-secondary hover:text-text-primary hover:border-border-focus'
-                    }
-                  `}
-                >
-                  {type === 'ALL' ? 'All Events' : type.replace('_', ' ')}
-                </button>
-              ))}
-            </div>
-          </div>
-        </Card>
 
         {/* Audit Logs Table */}
         <Card className="p-0 overflow-hidden">
-          {isLoading ? (
-            <div className="p-12">
-              <LoadingSpinner size="lg" />
-            </div>
-          ) : error ? (
-            <div className="p-8 text-center">
-              <AlertTriangle className="h-8 w-8 text-status-error mx-auto mb-3" />
-              <p className="text-text-secondary">Failed to load audit logs</p>
-            </div>
-          ) : !auditLogs || auditLogs.length === 0 ? (
-            <div className="p-12 text-center">
-              <FileText className="h-12 w-12 text-text-secondary/30 mx-auto mb-4" />
-              <p className="text-text-secondary">No audit events found</p>
-              <p className="text-sm text-text-secondary/70 mt-1">
-                {selectedEventType !== 'ALL'
-                  ? 'Try selecting a different event type filter'
-                  : 'Your activity will appear here'}
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-border-glass">
-                    <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                      Event
-                    </th>
-                    <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                      Timestamp
-                    </th>
-                    <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                      File
-                    </th>
-                    <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
-                      Details
-                    </th>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border-glass">
+                  <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                    Event
+                  </th>
+                  <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                    File
+                  </th>
+                  <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                    Timestamp
+                  </th>
+                  <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                    IP Address
+                  </th>
+                  <th className="text-left px-6 py-4 text-xs font-medium text-text-secondary uppercase tracking-wider">
+                    User Agent
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-glass">
+                {entries.map((entry) => (
+                  <tr key={entry.id} className="hover:bg-bg-glass/50 transition-colors">
+                    <td className="px-6 py-4">
+                      <EventTypeBadge eventType={entry.eventType} />
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="text-sm text-text-primary">
+                        {entry.fileName || 'N/A'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="text-sm text-text-secondary">
+                        {new Date(entry.createdAt).toLocaleString()}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="text-sm text-text-secondary font-mono">
+                        {entry.ipAddress || 'N/A'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="text-sm text-text-secondary truncate max-w-[200px] block">
+                        {entry.userAgent || 'N/A'}
+                      </span>
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-border-glass">
-                  {auditLogs.map((log) => {
-                    const config = eventTypeConfig[log.eventType] || {
-                      icon: FileText,
-                      color: 'text-text-secondary',
-                      label: log.eventType,
-                    };
-                    const Icon = config.icon;
-
-                    return (
-                      <tr
-                        key={log.id}
-                        className="hover:bg-bg-glass/50 transition-colors"
-                      >
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-2">
-                            <Icon className={`h-4 w-4 ${config.color}`} />
-                            <span className="text-sm font-medium text-text-primary">
-                              {config.label}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-2 text-sm text-text-secondary">
-                            <Clock className="h-3.5 w-3.5" />
-                            {new Date(log.createdAt).toLocaleString('en-US', {
-                              month: 'short',
-                              day: 'numeric',
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="text-sm text-text-secondary">
-                            {log.fileName || log.fileId || '-'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="text-sm text-text-secondary">
-                            {log.metadata
-                              ? Object.entries(log.metadata)
-                                  .map(([k, v]) => `${k}: ${v}`)
-                                  .join(', ')
-                              : log.ipAddress || '-'}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Card>
+
+        {/* Pagination Controls */}
+        <div className="flex items-center justify-between">
+          <Button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page === 1}
+            variant="secondary"
+          >
+            Previous
+          </Button>
+          <span className="text-sm text-text-secondary">
+            Page {page} of {totalPages}
+          </span>
+          <Button
+            onClick={() => setPage((p) => p + 1)}
+            disabled={page * limit >= (data?.total ?? 0)}
+            variant="secondary"
+          >
+            Next
+          </Button>
+        </div>
       </div>
     </main>
+  );
+}
+
+export default function AuditLogsPage() {
+  return (
+    <ProtectedRoute>
+      <AuditPageContent />
+    </ProtectedRoute>
   );
 }

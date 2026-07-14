@@ -1,9 +1,12 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// In production (Docker), the frontend is served behind nginx which proxies /api/* to the backend.
+// Use relative URL so browser requests go to the same origin (nginx handles routing).
+// In development, fall back to localhost:3001.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 export const api = axios.create({
-  baseURL: `${API_BASE_URL}/api`,
+  baseURL: API_BASE_URL ? `${API_BASE_URL}/api` : '/api',
   withCredentials: true,
   headers: {
     'Content-Type': 'application/json',

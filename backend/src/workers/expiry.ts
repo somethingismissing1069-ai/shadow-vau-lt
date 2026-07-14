@@ -33,12 +33,9 @@ export async function processExpiredFiles(): Promise<void> {
 
   for (const file of expiredFiles) {
     try {
-      // Each file cleanup in its own transaction via burnFile
-      // burnFile handles: delete encrypted_keys, revoke share_links,
-      // secure-delete file from disk, mark file as deleted
+
       await fileService.burnFile(file.id);
 
-      // Record EXPIRE audit event (burnFile records BURN, so we record EXPIRE separately)
       await auditService.recordEvent({
         eventType: 'EXPIRE',
         fileId: file.id,
@@ -47,12 +44,10 @@ export async function processExpiredFiles(): Promise<void> {
       logger.info({ fileId: file.id }, 'Expiry worker: cleaned up expired file');
     } catch (error) {
       logger.error({ fileId: file.id, error }, 'Expiry worker: failed to cleanup file');
-      // Continue processing other files - don't let one failure stop the rest
     }
   }
 }
 
-// Start cron job
 const job = cron.schedule(EXPIRY_CRON_SCHEDULE, () => {
   processExpiredFiles().catch((error) => {
     logger.error({ error }, 'Expiry worker: unhandled error in cron job');

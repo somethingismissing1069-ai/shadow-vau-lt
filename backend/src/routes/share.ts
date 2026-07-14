@@ -31,6 +31,8 @@ export function createShareRouter(fileService: IFileService): Router {
       const result = await fileService.downloadFile({
         token,
         password,
+        ipAddress: req.ip || req.headers['x-forwarded-for'] as string || undefined,
+        userAgent: req.headers['user-agent'] || undefined,
       });
 
       // Sanitize filename for Content-Disposition header

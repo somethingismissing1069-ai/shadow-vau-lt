@@ -23,13 +23,16 @@ export const MAX_CUSTOM_EXPIRY_SECONDS = 30 * 24 * 60 * 60; // 2,592,000 seconds
 /** Maximum upload file size: 100 MB in bytes */
 export const MAX_UPLOAD_BYTES = 104857600;
 
-/** Rate limiting defaults */
+/** Rate limiting defaults — can be overridden via environment variables */
 export const RATE_LIMITS = {
-  global: { windowMs: 60_000, max: 100 },
-  auth: { windowMs: 900_000, max: 10 }, // 10 attempts / 15 min
-  upload: { windowMs: 3_600_000, max: 20 }, // 20 uploads / hour
-  shareDownload: { windowMs: 60_000, max: 5 }, // 5 downloads / min per IP
-  passwordAttempt: { windowMs: 300_000, max: 5 }, // 5 password guesses / 5 min
+  global: {
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10),
+  },
+  auth: { windowMs: 900_000, max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '50', 10) },
+  upload: { windowMs: 3_600_000, max: 50 },
+  shareDownload: { windowMs: 60_000, max: 30 },
+  passwordAttempt: { windowMs: 300_000, max: 20 },
 } as const;
 
 /** JWT token expiry defaults (in seconds) */

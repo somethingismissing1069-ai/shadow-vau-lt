@@ -90,6 +90,8 @@ export function createFileRoutes(
             burnAfterReading,
             password,
             maxDownloads,
+            ipAddress: req.ip || req.headers['x-forwarded-for'] as string || undefined,
+            userAgent: req.headers['user-agent'] || undefined,
           },
           req.user!.userId
         );
